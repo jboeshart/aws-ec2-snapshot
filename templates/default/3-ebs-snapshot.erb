@@ -1,0 +1,172 @@
+#############################################################
+#
+# POWERSHELL: EBS Automatic Snapshot - Part #3: Snapshot Component
+# By Casey Labs Inc.
+# Github repo: https://github.com/CaseyLabs/aws-ec2-ebs-automatic-snapshot-powershell
+#
+############################################################
+
+
+## Set User-Defined Variables
+# How many days do you wish to retain backups for? Default: 7 days
+$retention_days = "<%= @snapshot_retention %>"
+
+## Set Variables
+Set-StrictMode -Version Latest
+$nl = [Environment]::NewLine
+$volume_list = @()
+$snapshot_list = @()
+$global:log_message = $null
+$hostname = hostname
+$today = Get-Date -format yyyy-MM-dd
+$curl = New-Object System.Net.WebClient
+$instance_id = $curl.DownloadString("http://169.254.169.254/latest/meta-data/instance-id")
+$region = $curl.DownloadString("http://169.254.169.254/latest/meta-data/placement/availability-zone")
+$region = $region.Substring(0,$region.Length-1)
+$logfile = "C:\ebs-snapshot\ebs-snapshot.log"
+<%= @aws_access_key_id  if node['aws-ec2-snapshot']['instance_uses_iam_role'] == false %>
+<%= @aws_secret_access_key if node['aws-ec2-snapshot']['instance_uses_iam_role'] == false %>
+
+## Function Declarations
+
+# Check if an event log source for this script exists; create one if it doesn't.
+function logsetup {
+	if (!([System.Diagnostics.EventLog]::SourceExists('EBS-Snapshot')))
+		{ New-Eventlog -LogName "Application" -Source "EBS-Snapshot" }
+}
+
+# Write to console and Application event log (event ID: 1337)
+function log ($type) {
+	#Write-Host $global:log_message
+	Write-EventLog -LogName Application -Source "EBS-Snapshot" -EntryType $type -EventID 1337 -Message $global:log_message
+}
+
+Function Write-Log
+{
+   Param ($Severity,$String)
+   $LogEntry = Get-Date -Format "MM-dd-yyyy HH:mm:ss"
+   $LogEntry += " - $Severity - "
+   $LogEntry += $string
+   Write-Host $LogEntry
+   $LogEntry | Out-File -Filepath $LogFile -Append
+   If ($Severity.ToUpper() -eq "ERRR") {
+     # Write Error level severity to the Windows event log
+     Write-EventLog -LogName Application -Source $ScriptName -EntryType Error -EventID 3 -Message $LogEntry
+   }
+   If ($Severity.ToUpper() -eq "WARN") {
+     # Write Warning level severity to the Windows event log
+     Write-EventLog -LogName Application -Source $ScriptName -EntryType Warning -EventID 2 -Message $LogEntry
+   }
+	 $global:log_message += $LogEntry
+	 $global:log_message += [Environment]::NewLine
+}
+
+# Pre-requisite check: make sure AWS CLI is installed properly.
+function prereqcheck {
+	if ((Get-Command "aws.exe" -ErrorAction SilentlyContinue) -eq $null) {
+		Write-Log -Severity ERRR -String "Unable to find aws.exe in your PATH.`nVisit http://aws.amazon.com/cli/ to download the AWS CLI tools."
+		log "Error"
+		break
+	}
+}
+
+# Snapshot all volumes attached to this instance.
+function snapshot_volumes {
+	foreach($volume_id in $volume_list)	{
+        $letter = get_drive_letter($volume_id)
+		$description="$hostname-$letter-backup-$today"
+		Write-Log -Severity INFO -String "Volume ID is $volume_id" + $nl
+
+		# Take a snapshot of the current volume, and capture the resulting snapshot ID
+		$snapresult = aws ec2 create-snapshot --region $region --output=text --description $description --volume-id $volume_id --query SnapshotId
+		Write-Log -Severity INFO -String "New snapshot is $snapresult" + $nl
+
+		# And then we're going to add a "CreatedBy:AutomatedBackup" tag to the resulting snapshot.
+		# Why? Because we only want to purge snapshots taken by the script later, and not delete snapshots manually taken.
+		aws ec2 create-tags --region $region --resource $snapresult --tags Key="CreatedBy,Value=AutomatedBackup"
+		Write-Log -Severity INFO -String "Volume ID is $volume_id." + $nl
+	}
+}
+
+# Delete all attached volume snapshots created by this script that are older than $retention_days
+function cleanup_snapshots {
+	foreach($volume_id in $volume_list) {
+		$snapshot_list = aws ec2 describe-snapshots --region $region --output=text --filters "Name=volume-id,Values=$volume_id" "Name=tag:CreatedBy,Values=AutomatedBackup" --query Snapshots[].SnapshotId | %{$_.split("`t")}
+		foreach($snapshot_id in $snapshot_list) {
+			Write-Log -Severity INFO -String "Checking $snapshot_id..." + $nl
+			$snapshot_date = aws ec2 describe-snapshots --region $region --output=text --snapshot-ids $snapshot_id --query Snapshots[].StartTime | %{$_.split('T')[0]}
+			$snapshot_age = (get-date $today) - (get-date $snapshot_date)  | select-object Days | foreach {$_.Days}
+
+			if ($snapshot_age -gt $retention_days) {
+				Write-Log -Severity INFO -String "Deleting snapshot $snapshot_id ..." + $nl
+				aws ec2 delete-snapshot --region $region --snapshot-id $snapshot_id
+			}
+			else {
+				Write-Log -Severity INFO -String "Not deleting snapshot $snapshot_id ..." + $nl
+			}
+		}
+	}
+}
+
+function get_drive_letter($volId) {
+    # Get the drive letter for the volume ID that was passed in
+
+    # Create a hash table that maps each device to a SCSI target
+    $Map = @{"0" = '/dev/sda1'}
+    for($x = 1; $x -le 26; $x++) {$Map.add($x.ToString(), [String]::Format("xvd{0}",[char](97 + $x)))}
+    for($x = 78; $x -le 102; $x++) {$Map.add($x.ToString(), [String]::Format("xvdc{0}",[char](19 + $x)))}
+
+    #Get the volumes attached to this instance
+    $BlockDeviceMappings = (Get-EC2Instance <%= @ps_aws_access_key_id  if node['aws-ec2-snapshot']['instance_uses_iam_role'] == false %> <%= @ps_aws_secret_access_key  if node['aws-ec2-snapshot']['instance_uses_iam_role'] == false %> -Region $region -Instance $instance_id).Instances.BlockDeviceMappings
+
+    $drives = Get-WmiObject -Class Win32_DiskDrive | % {
+        $Drive = $_
+        # Find the partitions for this drive
+        Get-WmiObject -Class Win32_DiskDriveToDiskPartition |  Where-Object {$_.Antecedent -eq $Drive.Path.Path} | %{
+            $D2P = $_
+            # Get details about each partition
+            $Partition = Get-WmiObject -Class Win32_DiskPartition |  Where-Object {$_.Path.Path -eq $D2P.Dependent}
+            # Find the drive that this partition is linked to
+            $Disk = Get-WmiObject -Class Win32_LogicalDiskToPartition | Where-Object {$_.Antecedent -in $D2P.Dependent} | %{
+                $L2P = $_
+                #Get the drive letter for this partition, if there is one
+                Get-WmiObject -Class Win32_LogicalDisk | Where-Object {$_.Path.Path -in $L2P.Dependent}
+            }
+            $BlockDeviceMapping = $BlockDeviceMappings | Where-Object {$_.DeviceName -eq $Map[$Drive.SCSITargetId.ToString()]}
+
+            # Display the information in a table
+            New-Object PSObject -Property @{
+                Device = $Map[$Drive.SCSITargetId.ToString()];
+                Disk = [Int]::Parse($Partition.Name.Split(",")[0].Replace("Disk #",""));
+                Boot = $Partition.BootPartition;
+                Partition = [Int]::Parse($Partition.Name.Split(",")[1].Replace(" Partition #",""));
+                SCSITarget = $Drive.SCSITargetId;
+                DriveLetter = If($Disk -eq $NULL) {"NA"} else {$Disk.DeviceID};
+                VolumeName = If($Disk -eq $NULL) {"NA"} else {$Disk.VolumeName};
+                VolumeId = If($BlockDeviceMapping -eq $NULL) {"NA"} else {$BlockDeviceMapping.Ebs.VolumeId}
+            }
+        }
+    }
+    foreach ($d in $drives) {
+        if ($volId -eq $d.VolumeId) {
+            $driveletter = $d.DriveLetter
+        }
+    }
+    return $driveletter
+}
+
+## START COMMANDS
+Write-Log -severity INFO -string "-----------------------------------------------------------------------------------"
+Write-Log -severity INFO -String "Script execution started by $env:USERDOMAIN\$env:USERNAME"
+# Initialization functions
+logsetup
+prereqcheck
+
+$volume_list = aws ec2 describe-volumes --region $region --filters Name="attachment.instance-id,Values=$instance_id" --query Volumes[].VolumeId --output text | %{$_.split("`t")}
+
+snapshot_volumes
+cleanup_snapshots
+
+# Write output to Event Log
+log "Info"
+Write-Log -Severity INFO -String "Script complete. Results written to the Event Log (check under Applications, Event ID 1377)."
