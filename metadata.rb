@@ -9,7 +9,7 @@ supports         'centos'
 supports         'rhel'
 supports         'fedora'
 supports         'windows'
-version          '1.0.0'
+version          '1.0.1'
 
 depends          "windows", ">= 1.37.0"
 depends          "awscli", ">= 1.1.1"
