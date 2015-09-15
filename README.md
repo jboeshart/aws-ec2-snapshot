@@ -82,3 +82,7 @@ For this script to work you either need to have an instance IAM role with the fo
     ]
 }
 ```
+
+License
+-------
+This software is licensed under the GNU General Public License v2.0.
