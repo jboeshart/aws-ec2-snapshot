@@ -13,4 +13,4 @@ REM # you will need to set the USERPROFILE below to match that Window user's pro
 
 REM removed the following line since we'll just use the profile of the servcie account
 REM set USERPROFILE=C:\Users\Administrator\
-powershell.exe -ExecutionPolicy Bypass -file "C:\ebs-snapshot\3-ebs-snapshot.ps1"
+powershell.exe -ExecutionPolicy Bypass -file "C:\ebs-snapshot\ps-ebs-snapshot.ps1"

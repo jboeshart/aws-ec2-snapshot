@@ -16,8 +16,8 @@ directory 'C:\ebs-snapshot' do
   action :create
 end
 
-cookbook_file 'C:\ebs-snapshot\1-start-ebs-snapshot.ps1' do
-  source '1-start-ebs-snapshot.ps1'
+cookbook_file 'C:\ebs-snapshot\ps-ebs-snapshot.ps1' do
+  source 'ps-ebs-snapshot.ps1'
   action :create
 end
 
@@ -40,7 +40,7 @@ end
 # Set up the scheduled task
 windows_task 'EC2 EBS Snapshot' do
   user 'SYSTEM'
-  command 'powershell -ExecutionPolicy bypass -file C:\\ebs-snapshot\\1-start-ebs-snapshot.ps1'
+  command 'powershell -ExecutionPolicy bypass -file C:\\ebs-snapshot\\2-run-backup.cmd'
   run_level :highest
   frequency :daily
   start_time '00:00'
